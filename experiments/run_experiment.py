@@ -67,6 +67,15 @@ def run_single_fold(clf_factory, X_train, y_train, X_test, y_test, classes):
     )
     metrics["fit_time"] = fit_time
     metrics["predict_time"] = predict_time
+
+    # Extract PW-NB training metadata — these live only in the fitted object.
+    # Must be captured here; once clf is discarded they are gone forever.
+    inner_clf = getattr(clf, "model_", clf)   # unwrap AdaptivePWNB → GaussianPWNB
+    if hasattr(inner_clf, "pr_scores_"):
+        metrics["mean_pr"] = float(inner_clf.pr_scores_.mean())
+    if hasattr(clf, "best_k_"):               # AdaptivePWNB only
+        metrics["best_k"] = float(clf.best_k_)
+
     return metrics
 
 
@@ -127,8 +136,9 @@ def run_experiment(
                 y_train, y_test = y[train_idx], y[test_idx]
 
                 try:
-                    # Adapt k for PW-NB on small datasets
-                    if "PW-NB" in clf_name:
+                    # Adapt k for fixed-k PW-NB variants on small datasets.
+                    # PW-NB(auto) handles k adaptation internally via inner CV.
+                    if "PW-NB" in clf_name and "k=" in clf_name:
                         k_str = clf_name.split("k=")[1].rstrip(")")
                         k_val = int(k_str)
                         adapted_k = adapt_k_for_dataset(k_val, y_train, ds_name)
@@ -206,11 +216,13 @@ def run_experiment(
     )
     agg.to_csv(summary_dir / "mean_std.csv", index=False)
 
-    # Pivot tables per metric
+    # Pivot tables per metric (separate mean and std files for journal reporting)
     for metric in METRICS:
         subset = agg[agg["metric"] == metric]
-        pivot = subset.pivot(index="dataset", columns="classifier", values="mean")
-        pivot.to_csv(summary_dir / f"{metric}_table.csv")
+        pivot_mean = subset.pivot(index="dataset", columns="classifier", values="mean")
+        pivot_mean.to_csv(summary_dir / f"{metric}_table_mean.csv")
+        pivot_std = subset.pivot(index="dataset", columns="classifier", values="std")
+        pivot_std.to_csv(summary_dir / f"{metric}_table_std.csv")
 
     # Print summary
     print("\n" + "=" * 80)

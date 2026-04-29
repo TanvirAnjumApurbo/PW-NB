@@ -21,9 +21,10 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.special import logsumexp
 from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.multiclass import unique_labels
-from sklearn.utils.validation import check_is_fitted, validate_data
+from sklearn.utils.validation import check_is_fitted
 
 from src.proximal_ratio import ProximalRatio
 
@@ -119,7 +120,7 @@ class GaussianPWNB(ClassifierMixin, BaseEstimator):
         -------
         self
         """
-        X, y = validate_data(self, X, y, dtype=np.float64, reset=True)
+        X, y = self._validate_data(X, y, dtype=np.float64, reset=True)
         self.classes_ = unique_labels(y)
         n_samples, n_features = X.shape
         n_classes = len(self.classes_)
@@ -213,14 +214,14 @@ class GaussianPWNB(ClassifierMixin, BaseEstimator):
     def predict(self, X: NDArray[np.floating]) -> NDArray[np.integer]:
         """Predict class labels for X."""
         check_is_fitted(self)
-        X = validate_data(self, X, dtype=np.float64, reset=False)
+        X = self._validate_data(X, dtype=np.float64, reset=False)
         jll = self._joint_log_likelihood(X)
         return self.classes_[np.argmax(jll, axis=1)]
 
     def predict_proba(self, X: NDArray[np.floating]) -> NDArray[np.floating]:
         """Predict class probabilities for X."""
         check_is_fitted(self)
-        X = validate_data(self, X, dtype=np.float64, reset=False)
+        X = self._validate_data(X, dtype=np.float64, reset=False)
         jll = self._joint_log_likelihood(X)
         log_prob_norm = jll - logsumexp(jll, axis=1, keepdims=True)
         return np.exp(log_prob_norm)
@@ -228,9 +229,156 @@ class GaussianPWNB(ClassifierMixin, BaseEstimator):
     def predict_log_proba(self, X: NDArray[np.floating]) -> NDArray[np.floating]:
         """Predict normalized log class probabilities for X."""
         check_is_fitted(self)
-        X = validate_data(self, X, dtype=np.float64, reset=False)
+        X = self._validate_data(X, dtype=np.float64, reset=False)
         jll = self._joint_log_likelihood(X)
         return jll - logsumexp(jll, axis=1, keepdims=True)
+
+
+class AdaptivePWNB(ClassifierMixin, BaseEstimator):
+    """PW-NB with inner cross-validation for automatic k selection.
+
+    Wraps GaussianPWNB and selects the best k from k_candidates using
+    stratified inner CV on each outer training fold. This avoids manual
+    k tuning while ensuring no information leakage from test data.
+
+    k candidates that exceed the minimum class size are filtered out
+    before inner CV. If fewer than two valid candidates remain, or the
+    data is too small for inner splits, the smallest valid k is used
+    directly.
+
+    Parameters
+    ----------
+    k_candidates : tuple of int, default=(5, 15, 30, 45)
+        Candidate k values to evaluate.
+    inner_folds : int, default=3
+        Number of inner CV folds for k selection.
+    metric : str, default="euclidean"
+        Distance metric passed to GaussianPWNB.
+    weight_floor : float, default=1e-3
+        Passed to GaussianPWNB.
+    var_smoothing : float, default=1e-9
+        Passed to GaussianPWNB.
+    empty_neighborhood_value : float, default=1.0
+        Passed to GaussianPWNB.
+    radius_estimator : str, default="mean"
+        Passed to GaussianPWNB.
+    random_state : int or None, default=None
+        Random state for inner CV splits and GaussianPWNB.
+
+    Attributes
+    ----------
+    best_k_ : int
+        k value selected by inner CV.
+    model_ : GaussianPWNB
+        Final model fitted on the full training set with best_k_.
+    classes_ : ndarray of shape (n_classes,)
+        Unique class labels.
+    n_features_in_ : int
+        Number of features seen during fit.
+    """
+
+    def __init__(
+        self,
+        k_candidates: tuple = (5, 15, 30, 45),
+        inner_folds: int = 3,
+        metric: str = "euclidean",
+        weight_floor: float = 1e-3,
+        var_smoothing: float = 1e-9,
+        empty_neighborhood_value: float = 1.0,
+        radius_estimator: str = "mean",
+        random_state: int | None = None,
+    ):
+        self.k_candidates = k_candidates
+        self.inner_folds = inner_folds
+        self.metric = metric
+        self.weight_floor = weight_floor
+        self.var_smoothing = var_smoothing
+        self.empty_neighborhood_value = empty_neighborhood_value
+        self.radius_estimator = radius_estimator
+        self.random_state = random_state
+
+    def _make_model(self, k: int) -> GaussianPWNB:
+        return GaussianPWNB(
+            k=k,
+            metric=self.metric,
+            weight_floor=self.weight_floor,
+            var_smoothing=self.var_smoothing,
+            empty_neighborhood_value=self.empty_neighborhood_value,
+            radius_estimator=self.radius_estimator,
+            random_state=self.random_state,
+        )
+
+    def fit(
+        self,
+        X: NDArray[np.floating],
+        y: NDArray[np.integer],
+    ) -> "AdaptivePWNB":
+        """Select k via inner CV then fit on the full training set."""
+        X, y = self._validate_data(X, y, dtype=np.float64, reset=True)
+        self.classes_ = unique_labels(y)
+
+        _, counts = np.unique(y, return_counts=True)
+        min_count = int(counts.min())
+
+        # Keep only candidates strictly less than the minimum class size
+        # (mirrors adapt_k_for_dataset logic used for fixed-k variants)
+        valid_k = [k for k in self.k_candidates if k < min_count]
+        if not valid_k:
+            valid_k = [max(1, min_count - 1)]
+
+        # Reduce inner folds if data is too small for the requested split
+        actual_inner_folds = min(self.inner_folds, min_count)
+
+        if actual_inner_folds < 2 or len(valid_k) == 1:
+            # Not enough data for inner CV — use the smallest valid k
+            self.best_k_ = valid_k[0]
+        else:
+            inner_cv = StratifiedKFold(
+                n_splits=actual_inner_folds,
+                shuffle=True,
+                random_state=self.random_state,
+            )
+            best_k, best_score = valid_k[0], -np.inf
+
+            for k in valid_k:
+                fold_scores = []
+                for tr_idx, val_idx in inner_cv.split(X, y):
+                    X_tr, y_tr = X[tr_idx], y[tr_idx]
+                    X_val, y_val = X[val_idx], y[val_idx]
+
+                    # Clip k to the inner fold's minimum class size
+                    _, inner_counts = np.unique(y_tr, return_counts=True)
+                    effective_k = min(k, max(1, int(inner_counts.min()) - 1))
+
+                    m = self._make_model(effective_k)
+                    m.fit(X_tr, y_tr)
+                    fold_scores.append(float(np.mean(m.predict(X_val) == y_val)))
+
+                mean_score = float(np.mean(fold_scores))
+                if mean_score > best_score:
+                    best_score = mean_score
+                    best_k = k
+
+            self.best_k_ = best_k
+
+        self.model_ = self._make_model(self.best_k_)
+        self.model_.fit(X, y)
+        return self
+
+    def predict(self, X: NDArray[np.floating]) -> NDArray[np.integer]:
+        """Predict class labels for X."""
+        check_is_fitted(self)
+        return self.model_.predict(X)
+
+    def predict_proba(self, X: NDArray[np.floating]) -> NDArray[np.floating]:
+        """Predict class probabilities for X."""
+        check_is_fitted(self)
+        return self.model_.predict_proba(X)
+
+    def predict_log_proba(self, X: NDArray[np.floating]) -> NDArray[np.floating]:
+        """Predict normalized log class probabilities for X."""
+        check_is_fitted(self)
+        return self.model_.predict_log_proba(X)
 
 
 class MultinomialPWNB(ClassifierMixin, BaseEstimator):
@@ -288,7 +436,7 @@ class MultinomialPWNB(ClassifierMixin, BaseEstimator):
         sample_weight: NDArray[np.floating] | None = None,
     ) -> MultinomialPWNB:
         """Fit Multinomial PW-NB according to X, y."""
-        X, y = validate_data(self, X, y, dtype=np.float64, reset=True)
+        X, y = self._validate_data(X, y, dtype=np.float64, reset=True)
         if np.any(X < 0):
             raise ValueError(
                 "Negative values in data passed to MultinomialPWNB (input X). "
@@ -348,14 +496,14 @@ class MultinomialPWNB(ClassifierMixin, BaseEstimator):
     def predict(self, X: NDArray[np.floating]) -> NDArray[np.integer]:
         """Predict class labels for X."""
         check_is_fitted(self)
-        X = validate_data(self, X, dtype=np.float64, reset=False)
+        X = self._validate_data(X, dtype=np.float64, reset=False)
         jll = self._joint_log_likelihood(X)
         return self.classes_[np.argmax(jll, axis=1)]
 
     def predict_proba(self, X: NDArray[np.floating]) -> NDArray[np.floating]:
         """Predict class probabilities for X."""
         check_is_fitted(self)
-        X = validate_data(self, X, dtype=np.float64, reset=False)
+        X = self._validate_data(X, dtype=np.float64, reset=False)
         jll = self._joint_log_likelihood(X)
         log_prob_norm = jll - logsumexp(jll, axis=1, keepdims=True)
         return np.exp(log_prob_norm)
@@ -363,6 +511,153 @@ class MultinomialPWNB(ClassifierMixin, BaseEstimator):
     def predict_log_proba(self, X: NDArray[np.floating]) -> NDArray[np.floating]:
         """Predict normalized log class probabilities for X."""
         check_is_fitted(self)
-        X = validate_data(self, X, dtype=np.float64, reset=False)
+        X = self._validate_data(X, dtype=np.float64, reset=False)
         jll = self._joint_log_likelihood(X)
         return jll - logsumexp(jll, axis=1, keepdims=True)
+
+
+class AdaptivePWNB(ClassifierMixin, BaseEstimator):
+    """PW-NB with inner cross-validation for automatic k selection.
+
+    Wraps GaussianPWNB and selects the best k from k_candidates using
+    stratified inner CV on each outer training fold. This avoids manual
+    k tuning while ensuring no information leakage from test data.
+
+    k candidates that exceed the minimum class size are filtered out
+    before inner CV. If fewer than two valid candidates remain, or the
+    data is too small for inner splits, the smallest valid k is used
+    directly.
+
+    Parameters
+    ----------
+    k_candidates : tuple of int, default=(5, 15, 30, 45)
+        Candidate k values to evaluate.
+    inner_folds : int, default=3
+        Number of inner CV folds for k selection.
+    metric : str, default="euclidean"
+        Distance metric passed to GaussianPWNB.
+    weight_floor : float, default=1e-3
+        Passed to GaussianPWNB.
+    var_smoothing : float, default=1e-9
+        Passed to GaussianPWNB.
+    empty_neighborhood_value : float, default=1.0
+        Passed to GaussianPWNB.
+    radius_estimator : str, default="mean"
+        Passed to GaussianPWNB.
+    random_state : int or None, default=None
+        Random state for inner CV splits and GaussianPWNB.
+
+    Attributes
+    ----------
+    best_k_ : int
+        k value selected by inner CV.
+    model_ : GaussianPWNB
+        Final model fitted on the full training set with best_k_.
+    classes_ : ndarray of shape (n_classes,)
+        Unique class labels.
+    n_features_in_ : int
+        Number of features seen during fit.
+    """
+
+    def __init__(
+        self,
+        k_candidates: tuple = (5, 15, 30, 45),
+        inner_folds: int = 3,
+        metric: str = "euclidean",
+        weight_floor: float = 1e-3,
+        var_smoothing: float = 1e-9,
+        empty_neighborhood_value: float = 1.0,
+        radius_estimator: str = "mean",
+        random_state: int | None = None,
+    ):
+        self.k_candidates = k_candidates
+        self.inner_folds = inner_folds
+        self.metric = metric
+        self.weight_floor = weight_floor
+        self.var_smoothing = var_smoothing
+        self.empty_neighborhood_value = empty_neighborhood_value
+        self.radius_estimator = radius_estimator
+        self.random_state = random_state
+
+    def _make_model(self, k: int) -> GaussianPWNB:
+        return GaussianPWNB(
+            k=k,
+            metric=self.metric,
+            weight_floor=self.weight_floor,
+            var_smoothing=self.var_smoothing,
+            empty_neighborhood_value=self.empty_neighborhood_value,
+            radius_estimator=self.radius_estimator,
+            random_state=self.random_state,
+        )
+
+    def fit(
+        self,
+        X: NDArray[np.floating],
+        y: NDArray[np.integer],
+    ) -> "AdaptivePWNB":
+        """Select k via inner CV then fit on the full training set."""
+        X, y = self._validate_data(X, y, dtype=np.float64, reset=True)
+        self.classes_ = unique_labels(y)
+
+        _, counts = np.unique(y, return_counts=True)
+        min_count = int(counts.min())
+
+        # Keep only candidates strictly less than the minimum class size
+        # (mirrors adapt_k_for_dataset logic used for fixed-k variants)
+        valid_k = [k for k in self.k_candidates if k < min_count]
+        if not valid_k:
+            valid_k = [max(1, min_count - 1)]
+
+        # Reduce inner folds if data is too small for the requested split
+        actual_inner_folds = min(self.inner_folds, min_count)
+
+        if actual_inner_folds < 2 or len(valid_k) == 1:
+            # Not enough data for inner CV — use the smallest valid k
+            self.best_k_ = valid_k[0]
+        else:
+            inner_cv = StratifiedKFold(
+                n_splits=actual_inner_folds,
+                shuffle=True,
+                random_state=self.random_state,
+            )
+            best_k, best_score = valid_k[0], -np.inf
+
+            for k in valid_k:
+                fold_scores = []
+                for tr_idx, val_idx in inner_cv.split(X, y):
+                    X_tr, y_tr = X[tr_idx], y[tr_idx]
+                    X_val, y_val = X[val_idx], y[val_idx]
+
+                    # Clip k to the inner fold's minimum class size
+                    _, inner_counts = np.unique(y_tr, return_counts=True)
+                    effective_k = min(k, max(1, int(inner_counts.min()) - 1))
+
+                    m = self._make_model(effective_k)
+                    m.fit(X_tr, y_tr)
+                    fold_scores.append(float(np.mean(m.predict(X_val) == y_val)))
+
+                mean_score = float(np.mean(fold_scores))
+                if mean_score > best_score:
+                    best_score = mean_score
+                    best_k = k
+
+            self.best_k_ = best_k
+
+        self.model_ = self._make_model(self.best_k_)
+        self.model_.fit(X, y)
+        return self
+
+    def predict(self, X: NDArray[np.floating]) -> NDArray[np.integer]:
+        """Predict class labels for X."""
+        check_is_fitted(self)
+        return self.model_.predict(X)
+
+    def predict_proba(self, X: NDArray[np.floating]) -> NDArray[np.floating]:
+        """Predict class probabilities for X."""
+        check_is_fitted(self)
+        return self.model_.predict_proba(X)
+
+    def predict_log_proba(self, X: NDArray[np.floating]) -> NDArray[np.floating]:
+        """Predict normalized log class probabilities for X."""
+        check_is_fitted(self)
+        return self.model_.predict_log_proba(X)

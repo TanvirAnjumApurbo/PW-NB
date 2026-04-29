@@ -10,7 +10,7 @@ from sklearn.naive_bayes import BernoulliNB, ComplementNB, GaussianNB, Multinomi
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import Binarizer, MinMaxScaler, StandardScaler
 
-from src.pw_nb import GaussianPWNB
+from src.pw_nb import AdaptivePWNB, GaussianPWNB
 
 logger = logging.getLogger("pwnb.baselines")
 
@@ -63,6 +63,12 @@ def get_baselines(
         registry[f"PW-NB(k={kk})"] = lambda kk=kk: GaussianPWNB(
             k=kk, random_state=random_state
         )
+
+    registry["PW-NB(auto)"] = lambda: AdaptivePWNB(
+        k_candidates=tuple(k_values),
+        inner_folds=3,
+        random_state=random_state,
+    )
 
     return registry
 
