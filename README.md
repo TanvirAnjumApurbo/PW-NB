@@ -10,7 +10,7 @@ PW-NB/
 │   ├── proximal_ratio.py   # PR computation (Equations 1-4)
 │   ├── pw_nb.py             # GaussianPWNB & MultinomialPWNB classifiers
 │   ├── metrics.py           # 10 evaluation metrics including ECE, Brier
-│   ├── datasets.py          # 24 benchmark datasets (sklearn + OpenML)
+│   ├── datasets.py          # 57 benchmark datasets (OpenML, CSV-driven DIDs)
 │   ├── baselines.py         # NB baseline registry
 │   └── utils.py             # Logging, seeding
 ├── experiments/
@@ -38,8 +38,8 @@ pytest tests/ -v
 # Quick experiment (3 datasets)
 python experiments/run_experiment.py --quick
 
-# Full experiment (23 datasets)
-python experiments/run_experiment.py --datasets all
+# Full experiment (57 datasets, auto-resumes)
+python experiments/run_experiment.py
 
 # Statistical tests & figures
 python experiments/statistical_tests.py
@@ -48,10 +48,10 @@ python experiments/visualize.py
 
 ## Key Results
 
-- PW-NB variants rank **1st-4th** across 23 datasets on accuracy (avg rank 3.43-3.96)
-- **16 wins, 4 ties, 3 losses** vs GaussianNB on accuracy
-- All Friedman tests significant (p < 0.05) across 10 metrics
-- Robust to choice of k (no significant differences among k=5,15,30,45)
+- **PW-NB(auto) ranks 1st on 7/10 metrics** across 57 datasets (avg rank 3.75–3.99)
+- **33 wins, 3 ties, 21 losses** vs GaussianNB on accuracy (58% win rate)
+- All Friedman tests significant (p < 0.05) across all 10 metrics
+- Robust to choice of k; auto-selection via inner CV adds a consistent edge
 
 See `results/REPORT.md` for the full experimental report.
 

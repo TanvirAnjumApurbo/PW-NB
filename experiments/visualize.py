@@ -142,6 +142,7 @@ def _tex(s: str) -> str:
     s = s.replace("–", "--")        # en dash
     s = s.replace("±", r"$\pm$")    # plus-minus sign
     s = s.replace("−", r"$-$")      # Unicode minus (U+2212)
+    s = s.replace("≈", r"$\approx$")  # approximately equal (U+2248)
     s = s.replace("%", r"\%")
     return s
 
@@ -299,7 +300,7 @@ def plot_pr_distribution(dataset_name: str, X, y, fig_dir: Path, k: int = 15):
     classes = np.unique(y)
 
     # Use tab10 for classes (works for up to 10 classes)
-    cmap = plt.cm.get_cmap("tab10", max(len(classes), 3))
+    cmap = matplotlib.colormaps["tab10"]
 
     fig, ax = plt.subplots(figsize=(5, 3.6))
     for idx, c in enumerate(classes):
@@ -351,7 +352,7 @@ def plot_ece_comparison(dataset_name: str, mean_std: pd.DataFrame, fig_dir: Path
 
 def plot_k_sensitivity(mean_std: pd.DataFrame, fig_dir: Path):
     """Accuracy and macro_f1 vs k, with PW-NB(auto) and GaussianNB reference lines."""
-    representative = ["iris", "wine", "breast_cancer", "glass", "ionosphere", "sonar"]
+    representative = ["iris", "wine", "breast-w", "glass", "ionosphere", "sonar"]
     k_values = [5, 15, 30, 45]
 
     has_auto = "PW-NB(auto)" in mean_std["classifier"].unique()
@@ -497,8 +498,8 @@ def plot_pr_gain_scatter(mean_std: pd.DataFrame, fig_dir: Path):
     ax.axhline(0, color="0.55", linestyle="-", linewidth=0.9)
     ax.set_xlabel("Mean PR Score  (training fold average)")
     ax.set_ylabel(_tex(f"Accuracy Gain  ({pwnb_clf} \u2212 GaussianNB)"))
-    ax.set_title("Does PW-NB Help More When Data Is Noisier?\n"
-                 "(Lower PR ≈ more class overlap in training fold)")
+    ax.set_title(_tex("Does PW-NB Help More When Data Is Noisier?\n"
+                      "(Lower PR ≈ more class overlap in training fold)"))
 
     handles = [
         Line2D([0], [0], marker="o", color="w", markerfacecolor=PWNB_COLOR,
@@ -606,7 +607,7 @@ def generate_all_figures(results_dir: Path, cache_dir: Path | None = None):
 
     # 3. PR score distributions (uses raw dataset files — reproducible post-hoc)
     from src.datasets import load_dataset
-    for ds_name in ["iris", "breast_cancer", "glass", "ionosphere", "sonar", "yeast"]:
+    for ds_name in ["iris", "breast-w", "glass", "ionosphere", "sonar", "wine"]:
         try:
             X, y, _ = load_dataset(ds_name, cache_dir)
             plot_pr_distribution(ds_name, X, y, fig_dir)
@@ -614,7 +615,7 @@ def generate_all_figures(results_dir: Path, cache_dir: Path | None = None):
             logger.error("PR distribution failed for %s: %s", ds_name, e)
 
     # 4. ECE comparison per representative dataset
-    for ds_name in ["iris", "breast_cancer", "page_blocks", "letter"]:
+    for ds_name in ["iris", "breast-w", "page-blocks", "letter"]:
         try:
             plot_ece_comparison(ds_name, mean_std, fig_dir)
         except Exception as e:

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
-from sklearn.metrics import pairwise_distances
+from scipy.spatial.distance import pdist, squareform
 from sklearn.neighbors import NearestNeighbors
 from sklearn.utils.validation import check_array, check_consistent_length
 
@@ -54,8 +54,10 @@ def _compute_class_radius_mean(X_c: NDArray[np.floating], metric: str) -> float:
     n_c = len(X_c)
     if n_c < 2:
         return np.inf
-    D = pairwise_distances(X_c, metric=metric)
-    return float(D.sum() / n_c)
+    # pdist computes only the upper triangle: n_c*(n_c-1)/2 entries
+    # Full symmetric matrix sum = 2 * upper-triangle sum (diagonal is 0)
+    d = pdist(X_c, metric=metric)
+    return float(2.0 * d.sum() / n_c)
 
 
 def _compute_class_radius_median(X_c: NDArray[np.floating], metric: str) -> float:
@@ -63,7 +65,7 @@ def _compute_class_radius_median(X_c: NDArray[np.floating], metric: str) -> floa
     n_c = len(X_c)
     if n_c < 2:
         return np.inf
-    D = pairwise_distances(X_c, metric=metric)
+    D = squareform(pdist(X_c, metric=metric))
     per_point_sums = D.sum(axis=1)
     return float(np.median(per_point_sums))
 
@@ -75,7 +77,7 @@ def _compute_class_radius_trimmed_mean(
     n_c = len(X_c)
     if n_c < 2:
         return np.inf
-    D = pairwise_distances(X_c, metric=metric)
+    D = squareform(pdist(X_c, metric=metric))
     per_point_sums = D.sum(axis=1)
     sorted_sums = np.sort(per_point_sums)
     trim_count = int(n_c * trim_fraction)
@@ -189,24 +191,28 @@ class ProximalRatio:
         nn.fit(X)
         dists, idxs = nn.kneighbors(X)
 
-        # Step 3: PR per point (Eq. 2)
-        pr = np.zeros(n, dtype=np.float64)
-        for i in range(n):
-            # Skip self (index 0 in the neighbor list)
-            neigh_idx = idxs[i, 1:]
-            neigh_dist = dists[i, 1:]
+        # Step 3: Vectorized PR computation (Eq. 2)
+        neigh_dists = dists[:, 1:]   # (n, k) — exclude self
+        neigh_idxs = idxs[:, 1:]
 
-            r = radii[y[i]]
+        # Per-point class radius lookup
+        point_radii = np.empty(n)
+        for c in classes:
+            point_radii[y == c] = radii[c]
 
-            # Filter neighbors within the class radius
-            in_radius_mask = neigh_dist <= r
-            in_idx = neigh_idx[in_radius_mask]
+        # Boolean masks over the (n, k) neighbor matrix
+        in_radius = neigh_dists <= point_radii[:, np.newaxis]
+        neigh_labels = y[neigh_idxs]
+        same_class = neigh_labels == y[:, np.newaxis]
 
-            if len(in_idx) == 0:
-                pr[i] = self.empty_neighborhood_value
-            else:
-                val = int(np.sum(y[in_idx] == y[i]))
-                pr[i] = val / len(in_idx)
+        n_in_radius = in_radius.sum(axis=1)
+        n_same_in_radius = (same_class & in_radius).sum(axis=1)
+
+        pr = np.where(
+            n_in_radius == 0,
+            self.empty_neighborhood_value,
+            n_same_in_radius / np.maximum(n_in_radius, 1),
+        )
 
         self._pr_scores = pr
         self._class_radii = radii
