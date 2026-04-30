@@ -23,7 +23,6 @@ did,name,NumberOfInstances,NumberOfFeatures,NumberOfClasses,bucket
 1466,cardiotocography,2126,36,10,imbalanced
 40691,wine-quality-red,1599,12,6,imbalanced
 40498,wine-quality-white,4898,12,7,imbalanced
-46936,internet_firewall,65532,12,4,imbalanced
 44232,UCI_churn,3333,21,2,imbalanced
 28,optdigits,5620,65,10,many_class
 32,pendigits,10992,17,10,many_class
@@ -34,15 +33,13 @@ did,name,NumberOfInstances,NumberOfFeatures,NumberOfClasses,bucket
 1459,artificial-characters,10218,8,10,many_class
 375,JapaneseVowels,9961,15,9,many_class
 40496,LED-display-domain-7digit,500,8,10,many_class
-46372,Multiclass_Classification_for_Corporate_Credit_Ratings,5000,8,10,many_class
+46372,corporate_credit_ratings,5000,8,10,many_class
 1120,MagicTelescope,19020,12,2,large_n
 1471,eeg-eye-state,14980,15,2,large_n
-151,electricity,45312,9,2,large_n
 4534,PhishingWebsites,11055,31,2,large_n
 42477,default-of-credit-card-clients,30000,24,2,large_n
 1046,mozilla4,15545,6,2,large_n
 43979,california,20634,9,2,large_n
-1461,bank-marketing,45211,17,2,large_n
 61,iris,150,5,3,standard
 187,wine,178,14,3,standard
 15,breast-w,699,10,2,standard

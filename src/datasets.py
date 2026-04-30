@@ -8,40 +8,19 @@ from pathlib import Path
 import numpy as np
 import openml
 import pandas as pd
-from sklearn.datasets import load_breast_cancer, load_digits, load_iris, load_wine
 from sklearn.preprocessing import LabelEncoder
 
 logger = logging.getLogger("pwnb.datasets")
 
-SKLEARN_DATASETS = {
-    "iris": load_iris,
-    "wine": load_wine,
-    "breast_cancer": load_breast_cancer,
-    "digits": load_digits,
-}
+_HERE = Path(__file__).resolve().parent
+_PROJECT_ROOT = _HERE.parent
+_CSV_PATH = _PROJECT_ROOT / "datasets_selected.csv"
 
-OPENML_DATASETS = {
-    "glass": {"name": "glass", "version": 1},
-    "vehicle": {"name": "vehicle", "version": 1},
-    "ionosphere": {"name": "ionosphere", "version": 1},
-    "sonar": {"name": "sonar", "version": 1},
-    "ecoli": {"name": "ecoli", "version": 1},
-    "yeast": {"name": "yeast", "version": 4},
-    "segment": {"name": "segment", "version": 1},
-    "waveform": {"name": "waveform-5000", "version": 1},
-    "optdigits": {"name": "optdigits", "version": 1},
-    "satellite": {"name": "satimage", "version": 1},
-    "pendigits": {"name": "pendigits", "version": 1},
-    "vowel": {"name": "vowel", "version": 1},
-    "balance_scale": {"name": "balance-scale", "version": 1},
-    "page_blocks": {"name": "page-blocks", "version": 1},
-    "spambase": {"name": "spambase", "version": 1},
-    "banknote": {"name": "banknote-authentication", "version": 1},
-    "robot_navigation": {"name": "wall-robot-navigation", "version": 1},
-    "letter": {"name": "letter", "version": 1},
-    "transfusion": {"name": "blood-transfusion-service-center", "version": 1},
-    "parkinsons": {"name": "parkinsons", "version": 1},
-}
+
+def _did_map() -> dict[str, int]:
+    """Return name → OpenML DID mapping from datasets_selected.csv."""
+    df = pd.read_csv(_CSV_PATH)
+    return dict(zip(df["name"], df["did"]))
 
 
 def _preprocess(
@@ -56,7 +35,6 @@ def _preprocess(
 
     # Convert X to float, handling categorical via get_dummies
     if isinstance(X, pd.DataFrame):
-        # Identify categorical columns
         cat_cols = X.select_dtypes(include=["category", "object"]).columns
         if len(cat_cols) > 0:
             X = pd.get_dummies(X, columns=cat_cols, drop_first=False)
@@ -102,59 +80,26 @@ def _compute_metadata(name: str, X: np.ndarray, y: np.ndarray, source: str) -> d
     }
 
 
-def _load_sklearn_dataset(name: str) -> tuple[np.ndarray, np.ndarray, dict]:
-    """Load a sklearn built-in dataset."""
-    loader = SKLEARN_DATASETS[name]
-    data = loader()
-    X, y = data.data, data.target
-    X, y = _preprocess(X, y, name)
-    meta = _compute_metadata(name, X, y, "sklearn")
-    return X, y, meta
-
-
-def _load_openml_dataset(
-    name: str, cache_dir: Path | None = None
+def _load_openml_by_did(
+    name: str, did: int, cache_dir: Path | None = None
 ) -> tuple[np.ndarray, np.ndarray, dict]:
-    """Load an OpenML dataset."""
-    spec = OPENML_DATASETS[name]
-    oml_name = spec["name"]
-    version = spec["version"]
-
+    """Load an OpenML dataset by its pinned DID."""
     if cache_dir is not None:
         openml.config.cache_directory = str(cache_dir)
 
-    try:
-        datasets = openml.datasets.list_datasets(
-            data_name=oml_name, output_format="dataframe"
-        )
-        if datasets.empty:
-            raise ValueError(f"No OpenML dataset found with name={oml_name}")
-
-        if version in datasets["version"].values:
-            did = int(datasets.loc[datasets["version"] == version].index[0])
-        else:
-            logger.warning("%s: version %d not available, using latest", name, version)
-            did = int(datasets.index[0])
-
-        ds = openml.datasets.get_dataset(did, download_data=True)
-    except Exception:
-        logger.warning("%s: list_datasets failed, trying direct fetch", name)
-        try:
-            ds = openml.datasets.get_dataset(
-                oml_name, version=version, download_data=True
-            )
-        except Exception:
-            ds = openml.datasets.get_dataset(
-                oml_name, version="active", download_data=True
-            )
-
+    ds = openml.datasets.get_dataset(
+        did,
+        download_data=True,
+        download_qualities=False,
+        download_features_meta_data=False,
+    )
     X_df, y_series, _, _ = ds.get_data(target=ds.default_target_attribute)
 
     X = X_df if isinstance(X_df, pd.DataFrame) else pd.DataFrame(X_df)
     y_arr = y_series.values if hasattr(y_series, "values") else np.asarray(y_series)
 
     X, y_arr = _preprocess(X, y_arr, name)
-    meta = _compute_metadata(name, X, y_arr, f"OpenML({oml_name})")
+    meta = _compute_metadata(name, X, y_arr, f"OpenML(DID={did})")
     return X, y_arr, meta
 
 
@@ -162,26 +107,21 @@ def load_dataset(
     name: str, cache_dir: Path | None = None
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """Load a single dataset by name."""
-    if name in SKLEARN_DATASETS:
-        return _load_sklearn_dataset(name)
-    elif name in OPENML_DATASETS:
-        return _load_openml_dataset(name, cache_dir)
-    else:
-        raise ValueError(f"Unknown dataset: {name}")
+    dm = _did_map()
+    if name not in dm:
+        raise ValueError(
+            f"Unknown dataset: {name!r}. "
+            f"Available: {sorted(dm)}"
+        )
+    return _load_openml_by_did(name, dm[name], cache_dir)
 
 
 def load_all_datasets(
     cache_dir: Path | None = None,
 ) -> dict[str, tuple[np.ndarray, np.ndarray, dict]]:
-    """Load all 24 datasets.
-
-    Returns
-    -------
-    dict mapping dataset name to (X, y, metadata).
-    """
-    all_names = list(SKLEARN_DATASETS.keys()) + list(OPENML_DATASETS.keys())
+    """Load all 60 datasets."""
     results = {}
-    for name in all_names:
+    for name in get_dataset_names():
         try:
             X, y, meta = load_dataset(name, cache_dir)
             results[name] = (X, y, meta)
@@ -199,5 +139,6 @@ def load_all_datasets(
 
 
 def get_dataset_names() -> list[str]:
-    """Return the ordered list of all dataset names."""
-    return list(SKLEARN_DATASETS.keys()) + list(OPENML_DATASETS.keys())
+    """Return the ordered list of all 60 dataset names."""
+    df = pd.read_csv(_CSV_PATH)
+    return list(df["name"])

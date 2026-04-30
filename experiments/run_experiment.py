@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedKFold
+from tqdm import tqdm
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -86,6 +87,7 @@ def run_experiment(
     random_state: int = 42,
     output_dir: Path = Path("results"),
     cache_dir: Path | None = None,
+    resume: bool = True,
 ):
     """Run the full experiment grid."""
     output_dir = Path(output_dir)
@@ -95,13 +97,41 @@ def run_experiment(
     summary_dir.mkdir(parents=True, exist_ok=True)
 
     error_log = raw_dir / "errors.log"
-    all_rows = []
     total_start = time.time()
 
+    # Resume: load already-completed data and skip finished datasets
+    temp_path = raw_dir / "all_folds_temp.csv"
+    all_rows = []
+    done_datasets: set[str] = set()
+    if resume and temp_path.exists():
+        df_existing = pd.read_csv(temp_path)
+        all_rows = df_existing.to_dict("records")
+        # A dataset is "done" if every classifier appears in it
+        clf_names = set(classifiers.keys())
+        for ds, grp in df_existing.groupby("dataset"):
+            if clf_names <= set(grp["classifier"].unique()):
+                done_datasets.add(ds)
+        if done_datasets:
+            logger.info(
+                "Resuming: skipping %d already-completed datasets: %s",
+                len(done_datasets),
+                sorted(done_datasets),
+            )
+
     total_tasks = len(datasets) * len(classifiers) * n_folds
-    completed = 0
+    completed = len(done_datasets) * len(classifiers) * n_folds
+
+    bar = tqdm(
+        total=total_tasks,
+        initial=completed,
+        unit="fold",
+        dynamic_ncols=True,
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} folds [{elapsed}<{remaining}, {rate_fmt}]",
+    )
 
     for ds_name in datasets:
+        if ds_name in done_datasets:
+            continue
         try:
             X, y, meta = load_dataset(ds_name, cache_dir)
         except Exception as e:
@@ -131,6 +161,7 @@ def run_experiment(
         )
 
         for clf_name, clf_factory in classifiers.items():
+            bar.set_description(f"{ds_name} | {clf_name}")
             for fold_idx, (train_idx, test_idx) in enumerate(skf.split(X, y)):
                 X_train, X_test = X[train_idx], X[test_idx]
                 y_train, y_test = y[train_idx], y[test_idx]
@@ -183,25 +214,20 @@ def run_experiment(
                         )
 
                 completed += 1
-
-            logger.info(
-                "Done: %s / %s [%d/%d]",
-                ds_name,
-                clf_name,
-                completed,
-                total_tasks,
-            )
+                bar.update(1)
 
         # Save intermediate results after each dataset
         if all_rows:
             df_temp = pd.DataFrame(all_rows)
             temp_path = raw_dir / "all_folds_temp.csv"
             df_temp.to_csv(temp_path, index=False)
+        bar.write(f"[saved] {ds_name} done ({completed}/{total_tasks} folds)")
 
     total_time = time.time() - total_start
     logger.info(
         "Total runtime: %.1f seconds (%.1f minutes)", total_time, total_time / 60
     )
+    bar.close()
 
     # Save final results
     df = pd.DataFrame(all_rows)
@@ -270,8 +296,28 @@ def main():
         help="Quick mode: only iris, wine, breast_cancer",
     )
     parser.add_argument("--no-cache", action="store_true")
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Start fresh, ignoring any existing all_folds_temp.csv",
+    )
+    parser.add_argument(
+        "--low-priority",
+        action="store_true",
+        help="Run at below-normal process priority to reduce system lag",
+    )
 
     args = parser.parse_args()
+
+    if args.low_priority:
+        try:
+            import psutil
+            p = psutil.Process()
+            p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+            logger.info("Process priority set to BELOW_NORMAL")
+        except Exception as e:
+            logger.warning("Could not set low priority: %s", e)
+
     seed_everything(args.seed)
 
     k_values = [int(k) for k in args.k_values.split(",")]
@@ -304,6 +350,7 @@ def main():
         random_state=args.seed,
         output_dir=Path(args.output_dir),
         cache_dir=cache_dir,
+        resume=not args.no_resume,
     )
 
 
